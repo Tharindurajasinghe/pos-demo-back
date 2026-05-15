@@ -37,7 +37,7 @@ const searchByBarcode = async (req, res) => {
     if (!barcode || !barcode.trim()) {
       return res.status(400).json({ message: 'Barcode is required' });
     }
-    const product = await Product.findOne({ barcode: barcode.trim() });
+    const product = await Product.findOne({ barcode:  { $regex: `^${barcode.trim()}$`, $options: 'i' }});
     if (!product) {
       return res.status(404).json({ message: 'No product found for this barcode' });
     }
