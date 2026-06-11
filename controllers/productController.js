@@ -30,14 +30,16 @@ const getAllProducts = async (req, res) => {
   }
 };
 
-// Search product by barcode (exact match)
+// Search product by barcode (case-insensitive)
 const searchByBarcode = async (req, res) => {
   try {
     const { barcode } = req.params;
     if (!barcode || !barcode.trim()) {
       return res.status(400).json({ message: 'Barcode is required' });
     }
-    const product = await Product.findOne({ barcode:  { $regex: `^${barcode.trim()}$`, $options: 'i' }});
+    const product = await Product.findOne({
+      barcode: { $regex: `^${barcode.trim()}$`, $options: 'i' }
+    });
     if (!product) {
       return res.status(404).json({ message: 'No product found for this barcode' });
     }
@@ -55,6 +57,48 @@ const searchProducts = async (req, res) => {
       name: { $regex: query, $options: 'i' }
     }).limit(20);
     res.json(products);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// Get products expiring within 10 days (or already expired)
+const getExpiringProducts = async (req, res) => {
+  try {
+    const Category = require('../models/Category');
+    const now = new Date();
+    const tenDaysFromNow = new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000);
+
+    const [products, categories] = await Promise.all([
+      Product.find({ expireDates: { $elemMatch: { $lte: tenDaysFromNow } } }),
+      Category.find()
+    ]);
+
+    // Build category id → name map
+    const categoryMap = {};
+    categories.forEach(c => { categoryMap[c.categoryId] = c.name; });
+
+    // Flatten: one row per (product variant + expireDate) that is within threshold
+    const warnings = [];
+    for (const product of products) {
+      for (const date of product.expireDates) {
+        if (new Date(date) <= tenDaysFromNow) {
+          warnings.push({
+            productId   : product.productId,
+            name        : product.name,
+            variant     : product.variant,
+            categoryName: categoryMap[product.categoryId] || product.categoryId,
+            expireDate  : date,
+            isExpired   : new Date(date) < now
+          });
+        }
+      }
+    }
+
+    // Sort by expireDate ascending (most urgent first)
+    warnings.sort((a, b) => new Date(a.expireDate) - new Date(b.expireDate));
+
+    res.json(warnings);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -107,10 +151,10 @@ const getProductVariants = async (req, res) => {
   }
 };
 
-// Add new product (BACKWARD COMPATIBLE - variant, unit and barcode are optional)
+// Add new product (BACKWARD COMPATIBLE - variant, unit, barcode and expireDates are optional)
 const addProduct = async (req, res) => {
   try {
-    const { productId, name, variant, categoryId, stock, buyingPrice, sellingPrice, unit, barcode } = req.body;
+    const { productId, name, variant, categoryId, stock, buyingPrice, sellingPrice, unit, barcode, expireDates } = req.body;
     
     // Use 'Standard' as default variant if not provided (backward compatible)
     const finalVariant = variant || 'Standard';
@@ -142,8 +186,6 @@ const addProduct = async (req, res) => {
     }
     
     // Validate stock based on unit
-    // For unit (piece/item), stock must be integer
-    // For Kg, g, L, ml - stock can be decimal
     if (finalUnit === 'unit') {
       if (!Number.isInteger(parseFloat(stock))) {
         return res.status(400).json({ message: 'Stock for "unit" must be a whole number (no decimals)' });
@@ -158,6 +200,11 @@ const addProduct = async (req, res) => {
         return res.status(400).json({ message: 'Barcode already assigned to another product variant' });
       }
     }
+
+    // Validate and clean expireDates if provided
+    const finalExpireDates = Array.isArray(expireDates)
+      ? expireDates.map(d => new Date(d)).filter(d => !isNaN(d.getTime()))
+      : [];
     
     const product = new Product({
       productId,
@@ -168,7 +215,8 @@ const addProduct = async (req, res) => {
       buyingPrice,
       sellingPrice,
       unit: finalUnit,
-      barcode: finalBarcode   // barcode field (null if not provided)
+      barcode: finalBarcode,
+      expireDates: finalExpireDates
     });
     
     const newProduct = await product.save();
@@ -178,12 +226,12 @@ const addProduct = async (req, res) => {
   }
 };
 
-// Update product (BACKWARD COMPATIBLE - unit and barcode are optional)
+// Update product (BACKWARD COMPATIBLE - unit, barcode and expireDates are optional)
 const updateProduct = async (req, res) => {
   try {
     const { id } = req.params;
     const { variant } = req.query;
-    const { name, categoryId, stock, buyingPrice, sellingPrice, unit, barcode } = req.body;
+    const { name, categoryId, stock, buyingPrice, sellingPrice, unit, barcode, expireDates } = req.body;
     
     // Use 'Standard' as default if variant not provided (backward compatible)
     const finalVariant = variant || 'Standard';
@@ -219,15 +267,15 @@ const updateProduct = async (req, res) => {
     }
 
     // UPDATE VARIANT NAME: if a new variant name is provided in body, rename it
-if (req.body.variant !== undefined && req.body.variant.trim() !== finalVariant) {
-  const newVariantName = req.body.variant.trim() || 'Standard';
-  // Check no other document with same productId already uses this variant name
-  const clash = await Product.findOne({ productId: id, variant: newVariantName, _id: { $ne: product._id } });
-  if (clash) {
-    return res.status(400).json({ message: `Variant name "${newVariantName}" already exists for this product` });
-  }
-  product.variant = newVariantName;
-}
+    if (req.body.variant !== undefined && req.body.variant.trim() !== finalVariant) {
+      const newVariantName = req.body.variant.trim() || 'Standard';
+      // Check no other document with same productId already uses this variant name
+      const clash = await Product.findOne({ productId: id, variant: newVariantName, _id: { $ne: product._id } });
+      if (clash) {
+        return res.status(400).json({ message: `Variant name "${newVariantName}" already exists for this product` });
+      }
+      product.variant = newVariantName;
+    }
     
     if (name) product.name = name;
     if (stock !== undefined) {
@@ -255,6 +303,13 @@ if (req.body.variant !== undefined && req.body.variant.trim() !== finalVariant) 
         }
       }
       product.barcode = newBarcode;
+    }
+
+    // UPDATE EXPIRE DATES: replace entire array (frontend sends complete current list)
+    if (expireDates !== undefined) {
+      product.expireDates = Array.isArray(expireDates)
+        ? expireDates.map(d => new Date(d)).filter(d => !isNaN(d.getTime()))
+        : [];
     }
     
     const updatedProduct = await product.save();
@@ -290,6 +345,7 @@ module.exports = {
   getAllProducts,
   searchProducts,
   searchByBarcode,
+  getExpiringProducts,
   getProductById,
   getProductVariants,
   addProduct,

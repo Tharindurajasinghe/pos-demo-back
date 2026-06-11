@@ -49,6 +49,10 @@ const productSchema = new mongoose.Schema({
     trim: true,
     default: null,
     sparse: true   // allows multiple null values while enforcing uniqueness on non-null
+  },
+  expireDates: {
+    type: [Date],
+    default: []
   }
 }, { timestamps: true });
 

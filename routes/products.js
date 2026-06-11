@@ -6,6 +6,7 @@ const {
   getNextProductId,
   getAllProducts,
   searchProducts,
+  getExpiringProducts,
   searchByBarcode,  // ✅ NEW: Import searchByBarcode
   getProductById,
   getProductVariants,
@@ -19,6 +20,9 @@ router.use(authenticateToken);
 
 // ✅ NEW: Search by barcode (MUST be before /:id route to avoid conflicts)
 router.get('/barcode/:barcode', searchByBarcode);
+
+// Get products expiring within 10 days (or already expired)
+router.get('/expiring', getExpiringProducts);
 
 // Get next available product ID
 router.get('/next-id', getNextProductId);
